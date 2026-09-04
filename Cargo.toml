@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+bytes = "1.12.1"
+h3 = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2", version = "0.0.8", features = ["tracing"] }
+h3-quinn = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2", version = "0.0.10", features = ["datagram", "tracing"] }
+h3-webtransport = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2", version = "0.1.2" }
+http = "1.5.0"
+quinn = "0.11.11"
+rcgen = "0.14.10"
+rustls = "0.23.43"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

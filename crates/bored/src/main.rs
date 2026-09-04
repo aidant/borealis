@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 use tracing_subscriber::fmt::format::FmtSpan;
 
+mod app;
 mod http3;
 mod https;
 
@@ -49,16 +50,21 @@ async fn main() -> Result<(), anyhow::Error> {
     )
     .unwrap();
 
+    let router = app::init().await?;
+
     tokio::try_join!(
         https::start_server(
             server_addr,
-            Arc::new(SingleCertAndKey::from(certified_key.clone()))
+            Arc::new(SingleCertAndKey::from(certified_key.clone())),
+            router.clone(),
         ),
         async {
-            Ok(
-                http3::start_server(server_addr, Arc::new(SingleCertAndKey::from(certified_key)))
-                    .await?,
+            Ok(http3::start_server(
+                server_addr,
+                Arc::new(SingleCertAndKey::from(certified_key)),
+                router,
             )
+            .await?)
         }
     )?;
 

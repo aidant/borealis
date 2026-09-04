@@ -1,16 +1,21 @@
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
+use axum::Router;
 use bytes::Bytes;
 use h3::ext::Protocol;
-use http::Method;
+use http::{Method, Request};
+use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
 use rustls::server::ResolvesServerCert;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info};
 
+use crate::app::Server;
+
 pub async fn start_server(
     addr: SocketAddr,
     cert_resolver: Arc<dyn ResolvesServerCert>,
+    app: Router,
 ) -> Result<(), io::Error> {
     let mut server_config =
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -37,7 +42,7 @@ pub async fn start_server(
         info!("HTTP/3 server listening on: {}", addr);
 
         while let Some(conn) = endpoint.accept().await {
-            let future = accept_quinn_connection(conn);
+            let future = accept_quinn_connection(conn, app.clone());
 
             tokio::spawn(async move {
                 if let Err(e) = future.await {
@@ -48,7 +53,7 @@ pub async fn start_server(
     }
 }
 
-async fn accept_quinn_connection(conn: quinn::Incoming) -> Result<(), anyhow::Error> {
+async fn accept_quinn_connection(conn: quinn::Incoming, app: Router) -> Result<(), anyhow::Error> {
     debug!("incomming HTTP/3 connection");
 
     let conn = h3::server::builder()
@@ -60,12 +65,15 @@ async fn accept_quinn_connection(conn: quinn::Incoming) -> Result<(), anyhow::Er
         .build::<h3_quinn::Connection, Bytes>(h3_quinn::Connection::new(conn.await?))
         .await?;
 
-    accept_h3_connection(conn).await;
+    accept_h3_connection(conn, app).await;
 
     Ok(())
 }
 
-async fn accept_h3_connection(mut conn: h3::server::Connection<h3_quinn::Connection, Bytes>) -> () {
+async fn accept_h3_connection(
+    mut conn: h3::server::Connection<h3_quinn::Connection, Bytes>,
+    app: Router,
+) -> () {
     loop {
         let Ok(Some(resolver)) = conn
             .accept()
@@ -75,7 +83,7 @@ async fn accept_h3_connection(mut conn: h3::server::Connection<h3_quinn::Connect
             break;
         };
 
-        let Ok((req, mut stream)) = resolver
+        let Ok((req, stream)) = resolver
             .resolve_request()
             .await
             .inspect_err(|e| error!("HTTP/3 request failed: {:?}", e))
@@ -98,26 +106,9 @@ async fn accept_h3_connection(mut conn: h3::server::Connection<h3_quinn::Connect
             break;
         }
 
-        // TODO: http server
-
-        let response = http::Response::builder().status(200).body(()).unwrap();
-
-        match stream.send_response(response).await {
-            Ok(_) => info!("sent 200 ok"),
-            Err(e) => error!("unable to send response: {:?}", e),
-        };
-
-        let payload = Bytes::from("<script>wt = new WebTransport(location.origin)</script>");
-
-        match stream.send_data(payload).await {
-            Ok(_) => info!("sent payload"),
-            Err(e) => error!("unable to send payload: {:?}", e),
-        };
-
-        match stream.finish().await {
-            Ok(_) => info!("finished"),
-            Err(e) => error!("unable to finish: {:?}", e),
-        };
+        let _ = accept_h3_request(req, stream, app.clone())
+            .await
+            .inspect_err(|e| error!("HTTP/3 request failed: {:?}", e));
     }
 
     ()
@@ -147,4 +138,39 @@ async fn accept_h3_session(
             }
         }
     }
+}
+
+async fn accept_h3_request(
+    req: Request<()>,
+    stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    app: Router,
+) -> Result<(), anyhow::Error> {
+    let hyper_service = TowerToHyperService::new(tower::ServiceBuilder::new().service(app));
+
+    let (mut parts, _body) = req.into_parts();
+
+    parts.extensions.insert(Server::Http3);
+
+    let (mut send, recv) = stream.split();
+
+    let req = hyper::Request::from_parts(parts, h3_util::server_body::H3IncomingServer::new(recv));
+    let res = hyper::service::Service::call(&hyper_service, req).await?;
+
+    let (res_parts, res_body) = res.into_parts();
+    send.send_response(hyper::Response::from_parts(res_parts, ()))
+        .await?;
+
+    let mut body_stream = std::pin::pin!(res_body);
+
+    while let Some(frame) = http_body_util::BodyExt::frame(&mut body_stream).await {
+        if let Some(chunk) = frame?.data_ref() {
+            if !chunk.is_empty() {
+                send.send_data(chunk.to_owned().into()).await?;
+            }
+        }
+    }
+
+    send.finish().await?;
+
+    Ok(())
 }

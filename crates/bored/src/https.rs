@@ -14,7 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::error;
 
-use crate::app::Server;
+use crate::app::{ServerImpl, ServerName};
 
 pub async fn start_server(
     addr: SocketAddr,
@@ -23,7 +23,7 @@ pub async fn start_server(
 ) -> Result<(), anyhow::Error> {
     let app = app.layer(middleware::from_fn(
         move |mut req: Request, next: Next| async move {
-            req.extensions_mut().insert(Server::Https);
+            req.extensions_mut().insert(ServerImpl::Https);
 
             let mut response = next.run(req).await;
 
@@ -61,6 +61,22 @@ async fn accept_tls_stream(
 ) -> Result<(), anyhow::Error> {
     let (stream, _addr) = listener.accept().await?;
     let stream = acceptor.accept(stream).await?;
+
+    let (_io, session) = stream.get_ref();
+
+    let server_name = session.server_name().map(|x| x.to_owned());
+
+    let app = app.layer(middleware::from_fn(move |mut req: Request, next: Next| {
+        let server_name = server_name.clone();
+
+        async move {
+            if let Some(server_name) = server_name {
+                req.extensions_mut().insert(ServerName(server_name));
+            };
+
+            next.run(req).await
+        }
+    }));
 
     let future = accept_tcp_stream(stream, app);
 

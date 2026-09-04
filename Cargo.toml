@@ -6,6 +6,7 @@ members = ["crates/*"]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["http2"] }
 bytes = "1.12.1"
+dashmap = "6.2.1"
 h3 = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2", version = "0.0.8", features = ["tracing"] }
 h3-quinn = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2", version = "0.0.10", features = ["datagram", "tracing"] }
 h3-util = { git = "https://github.com/youyuanwu/tonic-h3.git", rev = "efaf0647bb3cedb883f8b9e7dbc15f53984c97e2", version = "0.0.6", default-features = false, features = ["quinn", "tracing"] }

@@ -5,21 +5,29 @@ use axum::{
     extract::Request,
     middleware::{self, Next},
 };
+use bytes::Bytes;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     service::TowerToHyperService,
 };
 use rustls::server::ResolvesServerCert;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, oneshot},
+};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::error;
 
-use crate::app::{ServerImpl, ServerName};
+use crate::{
+    app::{ServerImpl, ServerName},
+    web_transport::WebTransportRegistry,
+};
 
 pub async fn start_server(
     addr: SocketAddr,
     cert_resolver: Arc<dyn ResolvesServerCert>,
     app: Router,
+    registry: WebTransportRegistry,
 ) -> Result<(), anyhow::Error> {
     let app = app.layer(middleware::from_fn(
         move |mut req: Request, next: Next| async move {
@@ -47,7 +55,14 @@ pub async fn start_server(
     let listener = TcpListener::bind(addr).await?;
 
     loop {
-        if let Err(e) = accept_tls_stream(acceptor.clone(), &listener, app.to_owned()).await {
+        if let Err(e) = accept_tls_stream(
+            acceptor.clone(),
+            &listener,
+            app.to_owned(),
+            registry.to_owned(),
+        )
+        .await
+        {
             error!("accepting HTTPS connection failed: {:?}", e);
             continue;
         };
@@ -58,20 +73,37 @@ async fn accept_tls_stream(
     acceptor: TlsAcceptor,
     listener: &TcpListener,
     app: Router,
+    registry: WebTransportRegistry,
 ) -> Result<(), anyhow::Error> {
     let (stream, _addr) = listener.accept().await?;
     let stream = acceptor.accept(stream).await?;
 
     let (_io, session) = stream.get_ref();
 
-    let server_name = session.server_name().map(|x| x.to_owned());
+    let server_name = session
+        .server_name()
+        .map(|server_name| ServerName(server_name.to_owned()));
+
+    if let Some(server_name) = server_name.clone() {
+        if let Some(tx) = registry.requests.get(&server_name) {
+            let future = bind_tcp_stream_to_web_transport(tx.to_owned(), stream);
+
+            tokio::spawn(async move {
+                if let Err(e) = future.await {
+                    error!("HTTPS request failed: {:?}", e);
+                }
+            });
+
+            return Ok(());
+        };
+    };
 
     let app = app.layer(middleware::from_fn(move |mut req: Request, next: Next| {
         let server_name = server_name.clone();
 
         async move {
             if let Some(server_name) = server_name {
-                req.extensions_mut().insert(ServerName(server_name));
+                req.extensions_mut().insert(server_name);
             };
 
             next.run(req).await
@@ -96,6 +128,33 @@ async fn accept_tcp_stream(stream: TlsStream<TcpStream>, app: Router) -> Result<
     {
         error!("failed to serve connection: {err:#}");
     }
+
+    Ok(())
+}
+
+async fn bind_tcp_stream_to_web_transport(
+    tx: mpsc::Sender<
+        oneshot::Sender<
+            Result<
+                h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+                anyhow::Error,
+            >,
+        >,
+    >,
+    stream: TlsStream<TcpStream>,
+) -> Result<(), anyhow::Error> {
+    let (resp_tx, resp_rx) = oneshot::channel::<
+        Result<
+            h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+            anyhow::Error,
+        >,
+    >();
+
+    if tx.send(resp_tx).await.is_err() {
+        return Err(anyhow::anyhow!("WebTransport session task dropped"));
+    }
+
+    let mut web_transport_stream = resp_rx.await??;
 
     Ok(())
 }

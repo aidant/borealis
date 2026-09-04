@@ -1,5 +1,9 @@
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::btree_map::ValuesMut, io, net::SocketAddr, sync::Arc, time::Duration};
 
+use crate::{
+    app::{ServerImpl, ServerName},
+    web_transport::WebTransportRegistry,
+};
 use axum::Router;
 use bytes::Bytes;
 use h3::ext::Protocol;
@@ -7,15 +11,17 @@ use http::{Method, Request, StatusCode};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
 use rustls::server::ResolvesServerCert;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{mpsc, oneshot},
+};
 use tracing::{debug, error, info};
-
-use crate::app::{ServerImpl, ServerName};
 
 pub async fn start_server(
     addr: SocketAddr,
     cert_resolver: Arc<dyn ResolvesServerCert>,
     app: Router,
+    registry: WebTransportRegistry,
 ) -> Result<(), io::Error> {
     let mut server_config =
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -42,7 +48,7 @@ pub async fn start_server(
         info!("HTTP/3 server listening on: {}", addr);
 
         while let Some(conn) = endpoint.accept().await {
-            let future = accept_quinn_connection(conn, app.clone());
+            let future = accept_quinn_connection(conn, app.clone(), registry.clone());
 
             tokio::spawn(async move {
                 if let Err(e) = future.await {
@@ -53,7 +59,11 @@ pub async fn start_server(
     }
 }
 
-async fn accept_quinn_connection(conn: quinn::Incoming, app: Router) -> Result<(), anyhow::Error> {
+async fn accept_quinn_connection(
+    conn: quinn::Incoming,
+    app: Router,
+    registry: WebTransportRegistry,
+) -> Result<(), anyhow::Error> {
     debug!("incomming HTTP/3 connection");
 
     let conn = conn.await?;
@@ -76,7 +86,7 @@ async fn accept_quinn_connection(conn: quinn::Incoming, app: Router) -> Result<(
         .build::<h3_quinn::Connection, Bytes>(h3_quinn::Connection::new(conn))
         .await?;
 
-    accept_h3_connection(conn, app, server_name).await;
+    accept_h3_connection(conn, app, server_name, registry).await;
 
     Ok(())
 }
@@ -85,6 +95,7 @@ async fn accept_h3_connection(
     mut conn: h3::server::Connection<h3_quinn::Connection, Bytes>,
     app: Router,
     server_name: Option<ServerName>,
+    registry: WebTransportRegistry,
 ) -> () {
     loop {
         let Ok(Some(resolver)) = conn
@@ -103,6 +114,20 @@ async fn accept_h3_connection(
             continue;
         };
 
+        if let Some(server_name) = server_name.clone() {
+            if let Some(tx) = registry.requests.get(&server_name) {
+                let future = bind_h3_request_to_web_transport(tx.to_owned(), req, stream);
+
+                tokio::spawn(async move {
+                    if let Err(e) = future.await {
+                        error!("HTTP/3 request failed: {:?}", e);
+                    }
+                });
+
+                continue;
+            };
+        };
+
         let method = req.method();
         let ext = req.extensions();
 
@@ -113,7 +138,11 @@ async fn accept_h3_connection(
                 break;
             };
 
-            accept_h3_session(session).await;
+            tokio::spawn(async move {
+                accept_h3_session(session, server_name, registry).await;
+            });
+
+            // accept_h3_session(session, server_name, registry).await;
 
             break;
         }
@@ -132,39 +161,112 @@ async fn accept_h3_connection(
 
 async fn accept_h3_session(
     session: h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>,
+    server_name: Option<ServerName>,
+    registry: WebTransportRegistry,
 ) -> () {
-    loop {
-        match session.accept_bi().await {
-            Ok(Some(h3_webtransport::server::AcceptedBi::BidiStream(_session_id, mut stream))) => {
-                let mut buf = vec![0; 1024];
-                while let Ok(n) = stream.read(&mut buf).await {
-                    if n == 0 {
+    let Some(server_name) = server_name else {
+        return;
+    };
+
+    let (tx, mut rx) = mpsc::channel::<
+        oneshot::Sender<
+            Result<
+                h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+                anyhow::Error,
+            >,
+        >,
+    >(32);
+
+    registry.requests.insert(server_name.clone(), tx);
+
+    let session_id = session.session_id();
+
+    tokio::spawn(async move {
+        async fn open_bi(
+            tx: oneshot::Sender<
+                Result<
+                    h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+                    anyhow::Error,
+                >,
+            >,
+            session_id: h3_webtransport::SessionId,
+            session: &h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>,
+        ) -> bool {
+            match session.open_bi(session_id).await {
+                Ok(stream) => {
+                    let _ = tx.send(Ok(stream)).inspect_err(|_| {
+                        error!("error sending bidirectional WebTransport stream");
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e.into())).inspect_err(|_| {
+                        error!("error sending bidirectional WebTransport error");
+                    });
+
+                    return true;
+                }
+            }
+
+            false
+        }
+
+        async fn accept_bi(
+            session: &h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>,
+        ) -> bool {
+            match session.accept_bi().await {
+                Ok(Some(h3_webtransport::server::AcceptedBi::BidiStream(
+                    _session_id,
+                    mut stream,
+                ))) => {
+                    let mut buf = vec![0; 1024];
+                    while let Ok(n) = stream.read(&mut buf).await {
+                        if n == 0 {
+                            break;
+                        }
+                        if stream.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(Some(h3_webtransport::server::AcceptedBi::Request(_req, mut stream))) => {
+                    let response = http::Response::builder()
+                        .status(StatusCode::NOT_IMPLEMENTED)
+                        .body(())
+                        .unwrap();
+
+                    let _ = stream.send_response(response).await;
+                    let _ = stream.finish().await;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!(
+                        "error accepting HTTP/3 WebTransport bidirectional stream {:?}",
+                        e
+                    );
+                    return true;
+                }
+            };
+
+            return false;
+        }
+
+        loop {
+            tokio::select! {
+                Some(tx) = rx.recv() => {
+                    if open_bi(tx, session_id, &session).await {
                         break;
                     }
-                    if stream.write_all(&buf[..n]).await.is_err() {
+                }
+                res = accept_bi(&session) => {
+                    if res {
                         break;
                     }
                 }
             }
-            Ok(Some(h3_webtransport::server::AcceptedBi::Request(_req, mut stream))) => {
-                let response = http::Response::builder()
-                    .status(StatusCode::NOT_IMPLEMENTED)
-                    .body(())
-                    .unwrap();
-
-                let _ = stream.send_response(response).await;
-                let _ = stream.finish().await;
-            }
-            Ok(None) => continue,
-            Err(e) => {
-                error!(
-                    "error accepting HTTP/3 WebTransport bidirectional stream {:?}",
-                    e
-                );
-                continue;
-            }
         }
-    }
+
+        registry.requests.remove(&server_name);
+    });
 }
 
 async fn accept_h3_request(
@@ -202,6 +304,52 @@ async fn accept_h3_request(
     }
 
     send.finish().await?;
+
+    Ok(())
+}
+
+async fn bind_h3_request_to_web_transport(
+    tx: mpsc::Sender<
+        oneshot::Sender<
+            Result<
+                h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+                anyhow::Error,
+            >,
+        >,
+    >,
+    req: Request<()>,
+    stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+) -> Result<(), anyhow::Error> {
+    let (resp_tx, resp_rx) = oneshot::channel::<
+        Result<
+            h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+            anyhow::Error,
+        >,
+    >();
+
+    if tx.send(resp_tx).await.is_err() {
+        return Err(anyhow::anyhow!("WebTransport session task dropped"));
+    }
+
+    let mut web_transport_stream = resp_rx.await??;
+
+    let (parts, _body) = req.into_parts();
+
+    web_transport_stream
+        .write_all(format!("{} {} HTTP/1.1\r\n", parts.method, parts.uri).as_bytes())
+        .await?;
+
+    for (key, value) in &parts.headers {
+        if let Ok(value) = value.to_str() {
+            web_transport_stream
+                .write_all(format!("{}: {}\r\n", key, value).as_bytes())
+                .await?;
+        }
+    }
+
+    web_transport_stream.write_all(b"\r\n").await?;
+
+    web_transport_stream.shutdown().await?;
 
     Ok(())
 }

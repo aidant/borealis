@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use axum::{Extension, Router, response::IntoResponse};
 use http::StatusCode;
 
@@ -7,9 +9,17 @@ pub enum ServerImpl {
     Http3,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct ServerName(pub String);
+
+impl Deref for ServerName {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 async fn fallback(
     server_impl: Option<Extension<ServerImpl>>,
@@ -20,7 +30,7 @@ async fn fallback(
         format!(
             "{} served via {}",
             match server_name {
-                Some(Extension(server_name)) => server_name.0,
+                Some(Extension(server_name)) => server_name.to_string(),
                 None => "<unknown>".to_string(),
             },
             match server_impl {

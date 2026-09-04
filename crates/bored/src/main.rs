@@ -8,9 +8,12 @@ use sha2::{Digest, Sha256};
 use tracing::info;
 use tracing_subscriber::fmt::format::FmtSpan;
 
+use crate::web_transport::WebTransportRegistry;
+
 mod app;
 mod http3;
 mod https;
+mod web_transport;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -51,18 +54,21 @@ async fn main() -> Result<(), anyhow::Error> {
     .unwrap();
 
     let router = app::init().await?;
+    let registry = WebTransportRegistry::new();
 
     tokio::try_join!(
         https::start_server(
             server_addr,
             Arc::new(SingleCertAndKey::from(certified_key.clone())),
             router.clone(),
+            registry.to_owned()
         ),
         async {
             Ok(http3::start_server(
                 server_addr,
                 Arc::new(SingleCertAndKey::from(certified_key)),
                 router,
+                registry,
             )
             .await?)
         }

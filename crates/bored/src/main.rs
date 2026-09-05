@@ -4,14 +4,13 @@ use rustls::{
     pki_types::PrivateKeyDer,
     sign::{CertifiedKey, SingleCertAndKey},
 };
-use sha2::{Digest, Sha256};
-use tracing::info;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::web_transport::WebTransportRegistry;
 
 mod app;
 mod http3;
+mod http_util;
 mod https;
 mod web_transport;
 

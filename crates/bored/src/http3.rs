@@ -2,12 +2,12 @@ use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::{
     app::{ServerImpl, ServerName},
+    http_util,
     web_transport::WebTransportRegistry,
 };
 use axum::Router;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use h3::ext::Protocol;
-use h3::quic::BidiStream;
 use http::{Method, Request, StatusCode, Uri};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
@@ -347,115 +347,9 @@ async fn bind_h3_request_to_web_transport(
         return Err(anyhow::anyhow!("WebTransport session task dropped"));
     }
 
-    let mut web_transport_stream = resp_rx.await??;
+    let web_transport_stream = resp_rx.await??;
 
-    let (parts, _body) = req.into_parts();
-
-    web_transport_stream
-        .write_all(format!("{} {} HTTP/1.1\r\n", parts.method, parts.uri).as_bytes())
-        .await?;
-
-    for (key, value) in &parts.headers {
-        if let Ok(value) = value.to_str() {
-            web_transport_stream
-                .write_all(format!("{}: {}\r\n", key, value).as_bytes())
-                .await?;
-        }
-    }
-
-    web_transport_stream.write_all(b"\r\n").await?;
-    web_transport_stream.flush().await?;
-
-    let (mut h3_send, mut h3_recv) = stream.split();
-    let (mut web_transport_send, mut web_transport_recv) = web_transport_stream.split();
-
-    let request_body_future = tokio::spawn(async move {
-        loop {
-            match h3_recv.recv_data().await {
-                Ok(Some(mut data)) => {
-                    let data = data.copy_to_bytes(data.remaining());
-
-                    if web_transport_send.write_all(&data).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    error!(
-                        "Reading HTTP/3 request body into to HTTP/1.1 WebTransport stream failed: {:?}",
-                        e
-                    );
-                    break;
-                }
-            }
-        }
-
-        let _ = web_transport_send.shutdown().await;
-    });
-
-    let mut vec = Vec::new();
-    let mut buf = [0; 1024];
-    let response_body_offset;
-    let response_status_code;
-    let mut response_headers = Vec::new();
-
-    loop {
-        let read_len = web_transport_recv.read(&mut buf).await?;
-
-        if read_len == 0 {
-            return Err(anyhow::anyhow!(
-                "Connection closed before HTTP/1.1 stream finished"
-            ));
-        }
-
-        vec.extend_from_slice(&buf[..read_len]);
-
-        let mut headers = [httparse::EMPTY_HEADER; 64];
-        let mut response_parser = httparse::Response::new(&mut headers);
-
-        match response_parser.parse(&vec)? {
-            httparse::Status::Complete(offset) => {
-                response_body_offset = offset;
-                response_status_code = response_parser.code.unwrap_or_default();
-                for header in response_parser.headers {
-                    response_headers.push((header.name.to_string(), header.value.to_vec()));
-                }
-                break;
-            }
-            httparse::Status::Partial => continue,
-        }
-    }
-
-    let mut response_builder = http::Response::builder().status(response_status_code);
-    let response_body_init = &vec[response_body_offset..];
-
-    for (name, value) in response_headers {
-        response_builder = response_builder.header(name.to_lowercase(), value)
-    }
-
-    h3_send.send_response(response_builder.body(())?).await?;
-
-    if !response_body_init.is_empty() {
-        h3_send
-            .send_data(Bytes::copy_from_slice(response_body_init))
-            .await?;
-    }
-
-    loop {
-        let read_len = web_transport_recv.read(&mut buf).await?;
-
-        if read_len == 0 {
-            break;
-        }
-
-        h3_send
-            .send_data(Bytes::copy_from_slice(&buf[..read_len]))
-            .await?;
-    }
-
-    h3_send.finish().await?;
-
-    let _ = request_body_future.await;
+    http_util::h3_to_http1(req, stream, web_transport_stream).await?;
 
     Ok(())
 }

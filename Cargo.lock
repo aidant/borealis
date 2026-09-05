@@ -193,7 +193,6 @@ dependencies = [
  "h3-webtransport",
  "http",
  "http-body-util",
- "httparse",
  "hyper",
  "hyper-util",
  "quinn",

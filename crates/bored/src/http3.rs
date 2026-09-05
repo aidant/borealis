@@ -1,4 +1,4 @@
-use std::{collections::btree_map::ValuesMut, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::{
     app::{ServerImpl, ServerName},
@@ -7,7 +7,7 @@ use crate::{
 use axum::Router;
 use bytes::Bytes;
 use h3::ext::Protocol;
-use http::{Method, Request, StatusCode};
+use http::{Method, Request, StatusCode, Uri};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
 use rustls::server::ResolvesServerCert;
@@ -129,6 +129,7 @@ async fn accept_h3_connection(
         };
 
         let method = req.method();
+        let uri = req.uri().to_owned();
         let ext = req.extensions();
 
         if method == &Method::CONNECT && ext.get::<Protocol>() == Some(&Protocol::WEB_TRANSPORT) {
@@ -139,10 +140,8 @@ async fn accept_h3_connection(
             };
 
             tokio::spawn(async move {
-                accept_h3_session(session, server_name, registry).await;
+                accept_h3_session(session, uri, server_name, registry).await;
             });
-
-            // accept_h3_session(session, server_name, registry).await;
 
             break;
         }
@@ -161,10 +160,26 @@ async fn accept_h3_connection(
 
 async fn accept_h3_session(
     session: h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>,
+    uri: Uri,
     server_name: Option<ServerName>,
     registry: WebTransportRegistry,
 ) -> () {
-    let Some(server_name) = server_name else {
+    let query_params = uri.query().and_then(|query| {
+        Some(
+            url::form_urlencoded::parse(query.as_bytes())
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+        )
+    });
+
+    let Some(server_name) = query_params
+        .and_then(|query_params| {
+            query_params
+                .get("host")
+                .and_then(|host| Some(ServerName(host.to_string())))
+        })
+        .or_else(|| server_name)
+    else {
         return;
     };
 

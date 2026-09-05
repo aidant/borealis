@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body>
+    <input id="domain" type="text" value="localhost">
+    <button onclick="handleConnect()">Connect</button>
+    <code id="request"></code>
+    <input id="response" type="text" value="HTTP/1.1 200 Ok\r\nContent-Length: 11\r\nContent-Type: text/plain\r\n\r\nhello world">
+    <button id="respond">Respond</button>
+    <script>
+      var transport
+
+      async function handleConnect() {
+        const url = new URL(`${window.location.protocol}//${window.location.hostname}:${window.location.port}/`)
+        url.searchParams.set('host', domain.value)
+
+        console.log('Creating WebTransport for', url)
+
+        transport = new WebTransport(url.href, {
+          serverCertificateHashes: [
+            {
+              algorithm: "sha-256",
+              value: new Uint8Array([])
+            }
+          ]
+        })
+
+        await transport.ready;
+
+        console.log('WebTransport ready')
+
+        const reader = transport.incomingBidirectionalStreams.getReader()
+        while (true) {
+          const { done, value } = await reader.read()
+
+          if (done) {
+            console.log('WebTransport incomming bidirectional stream finished')
+            break
+          }
+
+          console.log('WebTransport incomming bidirectional stream created')
+
+          await Promise.allSettled([readRequest(value.readable), writeResponse(value.writable)])
+        }
+      }
+
+      const encoder = new TextEncoder()
+      const decoder = new TextDecoder()
+
+      /** @param {ReadableStream} readable  */
+      async function readRequest(readable) {
+        const reader = readable.getReader()
+        while (true) {
+          const { value, done } = await reader.read()
+
+          if (done) {
+            console.log('WebTransport read stream finished')
+            break
+          }
+
+          console.log('WebTransport read stream produced', value, decoder.decode(value))
+
+          request.textContent += decoder.decode(value)
+        }
+      }
+
+      /** @param {WritableStream} writable  */
+      async function writeResponse(writable) {
+        await new Promise((resolve) => {
+          function handleClick() {
+            respond.removeEventListener('click', handleClick)
+            resolve()
+          }
+
+          respond.addEventListener('click', handleClick)
+        })
+
+        const writer = writable.getWriter()
+
+        console.log('writing response to WebTransport', encoder.encode(response.value), response.value)
+
+        writer.write(encoder.encode(response.value))
+      }
+    </script>
+  </body>
+</html>

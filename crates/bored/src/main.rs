@@ -32,19 +32,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let now = time::OffsetDateTime::now_utc();
 
-    let mut cert_params =
-        rcgen::CertificateParams::new(vec!["127.0.0.1".into(), "localhost".into()])?;
+    let mut cert_params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
     cert_params.not_before = now;
     cert_params.not_after = now + time::Duration::days(7);
     let signing_key = rcgen::KeyPair::generate()?;
     let cert = cert_params.self_signed(&signing_key)?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&cert.der());
-    let result = hasher.finalize();
-
-    let js_array_bytes = format!("{:?}", result.as_slice());
-    info!("value: new Uint8Array({})", js_array_bytes);
 
     let certified_key = CertifiedKey::from_der(
         vec![cert.der().to_owned()],
@@ -53,7 +45,7 @@ async fn main() -> Result<(), anyhow::Error> {
     )
     .unwrap();
 
-    let router = app::init().await?;
+    let router = app::init(cert.der().to_owned()).await?;
     let registry = WebTransportRegistry::new();
 
     tokio::try_join!(

@@ -26,6 +26,7 @@ tokio-rustls = "0.26.4"
 tower = { version = "0.5.3", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
 
 [patch.crates-io]
 h3 = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2" }

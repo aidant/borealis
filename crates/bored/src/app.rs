@@ -1,7 +1,13 @@
 use std::ops::Deref;
 
-use axum::{Extension, Router, response::IntoResponse};
+use axum::{
+    Extension, Router,
+    response::{Html, IntoResponse},
+    routing::get,
+};
 use http::StatusCode;
+use rustls::pki_types::CertificateDer;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ServerImpl {
@@ -42,8 +48,19 @@ async fn fallback(
     )
 }
 
-pub async fn init() -> Result<Router, anyhow::Error> {
-    let app = Router::new().fallback(fallback);
+pub async fn init(cert: CertificateDer<'static>) -> Result<Router, anyhow::Error> {
+    let mut hasher = Sha256::new();
+    hasher.update(cert);
+    let result = hasher.finalize();
+
+    let index_html = include_str!("./index.html").replace(
+        "new Uint8Array([])",
+        &format!("new Uint8Array({:?})", result.as_slice()),
+    );
+
+    let app = Router::new()
+        .route("/", get(async || Html(index_html)))
+        .fallback(fallback);
 
     Ok(app)
 }

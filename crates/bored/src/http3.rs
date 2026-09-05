@@ -5,8 +5,9 @@ use crate::{
     web_transport::WebTransportRegistry,
 };
 use axum::Router;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use h3::ext::Protocol;
+use h3::quic::BidiStream;
 use http::{Method, Request, StatusCode, Uri};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
@@ -365,7 +366,32 @@ async fn bind_h3_request_to_web_transport(
     web_transport_stream.write_all(b"\r\n").await?;
     web_transport_stream.flush().await?;
 
-    let (mut send, mut recv) = stream.split();
+    let (mut h3_send, mut h3_recv) = stream.split();
+    let (mut web_transport_send, mut web_transport_recv) = web_transport_stream.split();
+
+    let request_body_future = tokio::spawn(async move {
+        loop {
+            match h3_recv.recv_data().await {
+                Ok(Some(mut data)) => {
+                    let data = data.copy_to_bytes(data.remaining());
+
+                    if web_transport_send.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    error!(
+                        "Reading HTTP/3 request body into to HTTP/1.1 WebTransport stream failed: {:?}",
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+
+        let _ = web_transport_send.shutdown().await;
+    });
 
     let mut vec = Vec::new();
     let mut buf = [0; 1024];
@@ -374,7 +400,7 @@ async fn bind_h3_request_to_web_transport(
     let mut response_headers = Vec::new();
 
     loop {
-        let read_len = web_transport_stream.read(&mut buf).await?;
+        let read_len = web_transport_recv.read(&mut buf).await?;
 
         if read_len == 0 {
             return Err(anyhow::anyhow!(
@@ -407,26 +433,29 @@ async fn bind_h3_request_to_web_transport(
         response_builder = response_builder.header(name.to_lowercase(), value)
     }
 
-    send.send_response(response_builder.body(())?).await?;
+    h3_send.send_response(response_builder.body(())?).await?;
 
     if !response_body_init.is_empty() {
-        send.send_data(Bytes::copy_from_slice(response_body_init))
+        h3_send
+            .send_data(Bytes::copy_from_slice(response_body_init))
             .await?;
     }
 
     loop {
-        let read_len = web_transport_stream.read(&mut buf).await?;
+        let read_len = web_transport_recv.read(&mut buf).await?;
 
         if read_len == 0 {
             break;
         }
 
-        send.send_data(Bytes::copy_from_slice(&buf[..read_len]))
+        h3_send
+            .send_data(Bytes::copy_from_slice(&buf[..read_len]))
             .await?;
     }
 
-    send.finish().await?;
-    web_transport_stream.shutdown().await?;
+    h3_send.finish().await?;
+
+    let _ = request_body_future.await;
 
     Ok(())
 }

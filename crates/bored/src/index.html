@@ -80,9 +80,12 @@
 
         const writer = writable.getWriter()
 
-        console.log('writing response to WebTransport', encoder.encode(response.value), response.value)
+        const body = response.value.replaceAll('\\r\\n', '\r\n')
 
-        writer.write(encoder.encode(response.value))
+        console.log('writing response to WebTransport', encoder.encode(body), body)
+
+        await writer.write(encoder.encode(body))
+        await writer.close()
       }
     </script>
   </body>

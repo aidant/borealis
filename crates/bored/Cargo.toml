@@ -14,6 +14,7 @@ h3-util = { workspace = true }
 h3-webtransport = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
+httparse = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 quinn = { workspace = true }

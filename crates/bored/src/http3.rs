@@ -363,7 +363,69 @@ async fn bind_h3_request_to_web_transport(
     }
 
     web_transport_stream.write_all(b"\r\n").await?;
+    web_transport_stream.flush().await?;
 
+    let (mut send, mut recv) = stream.split();
+
+    let mut vec = Vec::new();
+    let mut buf = [0; 1024];
+    let response_body_offset;
+    let response_status_code;
+    let mut response_headers = Vec::new();
+
+    loop {
+        let read_len = web_transport_stream.read(&mut buf).await?;
+
+        if read_len == 0 {
+            return Err(anyhow::anyhow!(
+                "Connection closed before HTTP/1.1 stream finished"
+            ));
+        }
+
+        vec.extend_from_slice(&buf[..read_len]);
+
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut response_parser = httparse::Response::new(&mut headers);
+
+        match response_parser.parse(&vec)? {
+            httparse::Status::Complete(offset) => {
+                response_body_offset = offset;
+                response_status_code = response_parser.code.unwrap_or_default();
+                for header in response_parser.headers {
+                    response_headers.push((header.name.to_string(), header.value.to_vec()));
+                }
+                break;
+            }
+            httparse::Status::Partial => continue,
+        }
+    }
+
+    let mut response_builder = http::Response::builder().status(response_status_code);
+    let response_body_init = &vec[response_body_offset..];
+
+    for (name, value) in response_headers {
+        response_builder = response_builder.header(name.to_lowercase(), value)
+    }
+
+    send.send_response(response_builder.body(())?).await?;
+
+    if !response_body_init.is_empty() {
+        send.send_data(Bytes::copy_from_slice(response_body_init))
+            .await?;
+    }
+
+    loop {
+        let read_len = web_transport_stream.read(&mut buf).await?;
+
+        if read_len == 0 {
+            break;
+        }
+
+        send.send_data(Bytes::copy_from_slice(&buf[..read_len]))
+            .await?;
+    }
+
+    send.finish().await?;
     web_transport_stream.shutdown().await?;
 
     Ok(())

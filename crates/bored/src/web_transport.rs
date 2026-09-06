@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use bytes::Bytes;
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use tokio::sync::{mpsc, oneshot};
 use tracing::error;
 
@@ -54,18 +54,9 @@ impl WebTransportStreamSender {
         self,
         result: Result<h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>, E>,
     ) {
-        match result {
-            Ok(stream) => {
-                let _ = self.tx.send(Ok(stream)).inspect_err(|_| {
-                    error!("error sending bidirectional WebTransport stream");
-                });
-            }
-            Err(e) => {
-                let _ = self.tx.send(Err(e.into())).inspect_err(|_| {
-                    error!("error sending bidirectional WebTransport error");
-                });
-            }
-        }
+        let _ = self.tx.send(result.map_err(|e| e.into())).inspect_err(|_| {
+            error!("error sending bidirectional WebTransport stream");
+        });
     }
 }
 
@@ -112,7 +103,10 @@ impl WebTransportRegistry {
         }
     }
 
-    pub fn insert(&self, server_name: &ServerName) -> WebTransportStreamProvider {
+    pub fn insert(
+        &self,
+        server_name: &ServerName,
+    ) -> Result<WebTransportStreamProvider, anyhow::Error> {
         let (tx, rx) = mpsc::channel::<
             oneshot::Sender<
                 Result<
@@ -122,9 +116,19 @@ impl WebTransportRegistry {
             >,
         >(32);
 
-        self.requests.insert(server_name.to_owned(), tx);
+        match self.requests.entry(server_name.to_owned()) {
+            Entry::Occupied(_) => {
+                return Err(anyhow::anyhow!(
+                    "a WebTransport session is already registered for {}",
+                    server_name.deref()
+                ));
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(tx);
+            }
+        }
 
-        WebTransportStreamProvider { rx }
+        Ok(WebTransportStreamProvider { rx })
     }
 
     pub fn get(&self, server_name: &ServerName) -> Option<WebTransportStreamReceiver> {

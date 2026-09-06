@@ -211,7 +211,13 @@ async fn accept_h3_session(
         return;
     };
 
-    let mut web_transport_stream_provider = registry.insert(&server_name);
+    let mut web_transport_stream_provider = match registry.insert(&server_name) {
+        Ok(provider) => provider,
+        Err(e) => {
+            error!("error registering WebTransport session: {e:?}");
+            return;
+        }
+    };
 
     let session_id = session.session_id();
 

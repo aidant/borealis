@@ -11,6 +11,7 @@ h3 = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25
 h3-quinn = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2", version = "0.0.10", features = ["datagram", "tracing"] }
 h3-util = { git = "https://github.com/youyuanwu/tonic-h3.git", rev = "efaf0647bb3cedb883f8b9e7dbc15f53984c97e2", version = "0.0.6", default-features = false, features = ["quinn", "tracing"] }
 h3-webtransport = { git = "https://github.com/hyperium/h3.git", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2", version = "0.1.2" }
+hostaddr = "0.3.0"
 http = "1.5.0"
 http-body-util = "0.1.5"
 httparse = "1.10.1"

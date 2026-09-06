@@ -1,13 +1,15 @@
-use std::ops::Deref;
+use std::{ops::Deref, sync::Arc};
 
 use axum::{
     Extension, Router,
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
+use hostaddr::Domain;
 use http::StatusCode;
-use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
+
+use crate::tls_util::DynamicCertResolver;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ServerImpl {
@@ -48,18 +50,39 @@ async fn fallback(
     )
 }
 
-pub async fn init(cert: CertificateDer<'static>) -> Result<Router, anyhow::Error> {
-    let mut hasher = Sha256::new();
-    hasher.update(cert);
-    let result = hasher.finalize();
-
-    let index_html = include_str!("./index.html").replace(
-        "new Uint8Array([])",
-        &format!("new Uint8Array({:?})", result.as_slice()),
-    );
-
+pub async fn init(
+    dynamic_cert_resolver: Arc<DynamicCertResolver>,
+) -> Result<Router, anyhow::Error> {
     let app = Router::new()
-        .route("/", get(async || Html(index_html)))
+        .route(
+            "/",
+            get(async move |server_name: Option<Extension<ServerName>>| -> Result<Response, (StatusCode, &'static str)> {
+                let domain_name = Domain::<String>::try_from(
+                    server_name
+                        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "missing server_name"))?
+                        .to_string(),
+                )
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "invalid domain_name"))?;
+                let certified_key = dynamic_cert_resolver
+                    .get(&domain_name)
+                    .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no certified_key"))?;
+                let cert = certified_key
+                    .cert
+                    .first()
+                    .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no cert"))?;
+
+                let mut hasher = Sha256::new();
+                hasher.update(cert);
+                let result = hasher.finalize();
+
+                let index_html = include_str!("./index.html").replace(
+                    "new Uint8Array([])",
+                    &format!("new Uint8Array({:?})", result.as_slice()),
+                );
+
+                Ok(Html(index_html).into_response())
+            }),
+        )
         .fallback(fallback);
 
     Ok(app)

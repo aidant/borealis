@@ -12,6 +12,7 @@ h3 = { workspace = true }
 h3-quinn = { workspace = true }
 h3-util = { workspace = true }
 h3-webtransport = { workspace = true }
+hostaddr = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true }

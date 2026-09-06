@@ -1,17 +1,14 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use rustls::{
-    pki_types::PrivateKeyDer,
-    sign::{CertifiedKey, SingleCertAndKey},
-};
 use tracing_subscriber::fmt::format::FmtSpan;
 
-use crate::web_transport::WebTransportRegistry;
+use crate::{tls_util::DynamicCertResolver, web_transport::WebTransportRegistry};
 
 mod app;
 mod http3;
 mod http_util;
 mod https;
+mod tls_util;
 mod web_transport;
 
 #[tokio::main]
@@ -29,40 +26,20 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let server_addr: SocketAddr = "127.0.0.1:8443".parse()?;
 
-    let now = time::OffsetDateTime::now_utc();
+    let dynamic_cert_resolver = DynamicCertResolver::new();
 
-    let mut cert_params = rcgen::CertificateParams::new(vec!["localhost".into()])?;
-    cert_params.not_before = now;
-    cert_params.not_after = now + time::Duration::days(7);
-    let signing_key = rcgen::KeyPair::generate()?;
-    let cert = cert_params.self_signed(&signing_key)?;
-
-    let certified_key = CertifiedKey::from_der(
-        vec![cert.der().to_owned()],
-        PrivateKeyDer::try_from(signing_key.serialize_der()).unwrap(),
-        &rustls::crypto::aws_lc_rs::default_provider(),
-    )
-    .unwrap();
-
-    let router = app::init(cert.der().to_owned()).await?;
+    let resolver = Arc::new(dynamic_cert_resolver);
+    let router = app::init(resolver.to_owned()).await?;
     let registry = WebTransportRegistry::new();
 
     tokio::try_join!(
         https::start_server(
             server_addr,
-            Arc::new(SingleCertAndKey::from(certified_key.clone())),
+            resolver.to_owned(),
             router.clone(),
             registry.to_owned()
         ),
-        async {
-            Ok(http3::start_server(
-                server_addr,
-                Arc::new(SingleCertAndKey::from(certified_key)),
-                router,
-                registry,
-            )
-            .await?)
-        }
+        async { Ok(http3::start_server(server_addr, resolver, router, registry).await?) }
     )?;
 
     Ok(())

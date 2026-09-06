@@ -65,7 +65,7 @@ where
         .send_response(http::Response::from_parts(h3_response_parts, ()))
         .await?;
 
-    h3_send_body::<S>(&mut h3_send, http1_response_body).await?;
+    h3_send_body::<S, _>(&mut h3_send, http1_response_body).await?;
 
     Ok(())
 }

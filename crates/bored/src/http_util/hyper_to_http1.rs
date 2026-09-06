@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use http::StatusCode;
 use http_body_util::BodyExt;
-use hyper::body::Body as _;
+use hyper::body::Body;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::error;
 
@@ -12,11 +12,14 @@ use crate::http_util::{
 pub type ProxiedResponse =
     hyper::Response<http_body_util::combinators::BoxBody<Bytes, hyper::Error>>;
 
-pub async fn hyper_to_http1<I>(
-    hyper_request: hyper::Request<hyper::body::Incoming>,
+pub async fn hyper_to_http1<B, I>(
+    hyper_request: hyper::Request<B>,
     http1_io: I,
 ) -> ProxiedResponse
 where
+    B: Body + Send + 'static,
+    B::Data: Send,
+    B::Error: std::error::Error + Send + Sync + 'static,
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (hyper_request_parts, body) = hyper_request.into_parts();

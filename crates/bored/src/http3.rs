@@ -2,12 +2,12 @@ use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::{
     app::{ServerImpl, ServerName},
-    http_util,
+    http_util::{self, h3_recv_body, h3_send_body},
     web_transport::WebTransportRegistry,
 };
 use axum::Router;
 use bytes::Bytes;
-use h3::ext::Protocol;
+use h3::{ext::Protocol, server::RequestStream};
 use http::{Method, Request, StatusCode, Uri};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
@@ -285,41 +285,37 @@ async fn accept_h3_session(
     });
 }
 
-async fn accept_h3_request(
-    req: Request<()>,
-    stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+async fn accept_h3_request<S>(
+    h3_request: Request<()>,
+    h3_stream: RequestStream<S, Bytes>,
     app: Router,
     server_name: Option<ServerName>,
-) -> Result<(), anyhow::Error> {
+) -> Result<(), anyhow::Error>
+where
+    S: h3::quic::BidiStream<Bytes> + Send,
+    <S as h3::quic::BidiStream<bytes::Bytes>>::RecvStream: Send + 'static,
+{
     let hyper_service = TowerToHyperService::new(tower::ServiceBuilder::new().service(app));
 
-    let (mut parts, _body) = req.into_parts();
+    let (mut h3_request_parts, _) = h3_request.into_parts();
 
-    parts.extensions.insert(ServerImpl::Http3);
+    h3_request_parts.extensions.insert(ServerImpl::Http3);
     if let Some(server_name) = server_name {
-        parts.extensions.insert(server_name);
+        h3_request_parts.extensions.insert(server_name);
     }
 
-    let (mut send, recv) = stream.split();
+    let (mut h3_send, h3_recv) = h3_stream.split();
 
-    let req = hyper::Request::from_parts(parts, h3_util::server_body::H3IncomingServer::new(recv));
-    let res = hyper::service::Service::call(&hyper_service, req).await?;
+    let request = hyper::Request::from_parts(h3_request_parts, h3_recv_body(h3_recv));
+    let response = hyper::service::Service::call(&hyper_service, request).await?;
 
-    let (res_parts, res_body) = res.into_parts();
-    send.send_response(hyper::Response::from_parts(res_parts, ()))
+    let (response_parts, response_body) = response.into_parts();
+
+    h3_send
+        .send_response(hyper::Response::from_parts(response_parts, ()))
         .await?;
 
-    let mut body_stream = std::pin::pin!(res_body);
-
-    while let Some(frame) = http_body_util::BodyExt::frame(&mut body_stream).await {
-        if let Ok(data) = frame?.into_data() {
-            if !data.is_empty() {
-                send.send_data(data).await?;
-            }
-        }
-    }
-
-    send.finish().await?;
+    h3_send_body::<S, _>(&mut h3_send, response_body).await?;
 
     Ok(())
 }

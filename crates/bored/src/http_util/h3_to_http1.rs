@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use h3::{error::StreamError, server::RequestStream};
-use h3_util::server_body::H3IncomingServer;
 use http::{Request, StatusCode};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::error;
 
 use crate::http_util::{
-    http1_response_parts_to_response_parts, request_parts_to_http1_request_parts,
+    h3_recv_body::h3_recv_body, h3_send_body::h3_send_body, http1_response_parts_to_response_parts,
+    request_parts_to_http1_request_parts,
 };
 
 pub async fn h3_to_http1<S, I>(
@@ -19,15 +19,15 @@ where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     <S as h3::quic::BidiStream<bytes::Bytes>>::RecvStream: Send + 'static,
 {
+    let (mut h3_send, h3_recv) = h3_stream.split();
     let (h3_request_parts, _) = h3_request.into_parts();
+
     let http1_request_parts = match request_parts_to_http1_request_parts(h3_request_parts, None) {
         Ok(parts) => parts,
-        Err(status) => return Ok(send_error(h3_stream, status).await?),
+        Err(status) => return Ok(send_error(h3_send, status).await?),
     };
 
-    let (mut h3_send, h3_recv) = h3_stream.split();
-
-    let request = hyper::Request::from_parts(http1_request_parts, H3IncomingServer::new(h3_recv));
+    let request = hyper::Request::from_parts(http1_request_parts, h3_recv_body(h3_recv));
 
     let (mut http1_sender, http1_connection) =
         match hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(http1_io)).await {
@@ -65,12 +65,7 @@ where
         .send_response(http::Response::from_parts(h3_response_parts, ()))
         .await?;
 
-    h3_util::server_body::send_h3_server_body::<hyper::body::Incoming, S>(
-        &mut h3_send,
-        http1_response_body,
-    )
-    .await
-    .map_err(anyhow::Error::from_boxed)?;
+    h3_send_body::<S>(&mut h3_send, http1_response_body).await?;
 
     Ok(())
 }

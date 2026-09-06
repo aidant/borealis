@@ -2,12 +2,15 @@ use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::{
     app::{ServerImpl, ServerName},
-    http_util::{self, h3_recv_body, h3_send_body},
+    http_util,
     web_transport::WebTransportRegistry,
 };
-use axum::Router;
+use axum::{
+    Router,
+    middleware::{self, Next},
+};
 use bytes::Bytes;
-use h3::{ext::Protocol, server::RequestStream};
+use h3::ext::Protocol;
 use http::{Method, Request, StatusCode, Uri};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
@@ -24,6 +27,14 @@ pub async fn start_server(
     app: Router,
     registry: WebTransportRegistry,
 ) -> Result<(), io::Error> {
+    let app = app.layer(middleware::from_fn(
+        |mut req: axum::extract::Request, next: Next| async move {
+            req.extensions_mut().insert(ServerImpl::Http3);
+
+            next.run(req).await
+        },
+    ));
+
     let mut server_config =
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_no_client_auth()
@@ -98,6 +109,24 @@ async fn accept_h3_connection(
     server_name: Option<ServerName>,
     registry: WebTransportRegistry,
 ) -> () {
+    let app = app.layer(middleware::from_fn({
+        let server_name = server_name.clone();
+
+        move |mut req: axum::extract::Request, next: Next| {
+            let server_name = server_name.clone();
+
+            async move {
+                if let Some(server_name) = server_name {
+                    req.extensions_mut().insert(server_name);
+                };
+
+                next.run(req).await
+            }
+        }
+    }));
+
+    let hyper_service = TowerToHyperService::new(tower::ServiceBuilder::new().service(app));
+
     loop {
         let Ok(Some(resolver)) = conn
             .accept()
@@ -147,7 +176,7 @@ async fn accept_h3_connection(
             break;
         }
 
-        let future = accept_h3_request(req, stream, app.clone(), server_name.clone());
+        let future = http_util::h3_server(req, stream, hyper_service.to_owned());
 
         tokio::spawn(async move {
             if let Err(e) = future.await {
@@ -283,41 +312,6 @@ async fn accept_h3_session(
 
         registry.requests.remove(&server_name);
     });
-}
-
-async fn accept_h3_request<S>(
-    h3_request: Request<()>,
-    h3_stream: RequestStream<S, Bytes>,
-    app: Router,
-    server_name: Option<ServerName>,
-) -> Result<(), anyhow::Error>
-where
-    S: h3::quic::BidiStream<Bytes> + Send,
-    <S as h3::quic::BidiStream<bytes::Bytes>>::RecvStream: Send + 'static,
-{
-    let hyper_service = TowerToHyperService::new(tower::ServiceBuilder::new().service(app));
-
-    let (mut h3_request_parts, _) = h3_request.into_parts();
-
-    h3_request_parts.extensions.insert(ServerImpl::Http3);
-    if let Some(server_name) = server_name {
-        h3_request_parts.extensions.insert(server_name);
-    }
-
-    let (mut h3_send, h3_recv) = h3_stream.split();
-
-    let request = hyper::Request::from_parts(h3_request_parts, h3_recv_body(h3_recv));
-    let response = hyper::service::Service::call(&hyper_service, request).await?;
-
-    let (response_parts, response_body) = response.into_parts();
-
-    h3_send
-        .send_response(hyper::Response::from_parts(response_parts, ()))
-        .await?;
-
-    h3_send_body::<S, _>(&mut h3_send, response_body).await?;
-
-    Ok(())
 }
 
 async fn bind_h3_request_to_web_transport(

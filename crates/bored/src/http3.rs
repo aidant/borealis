@@ -2,8 +2,8 @@ use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::{
     app::{ServerImpl, ServerName},
-    http_util,
-    web_transport::WebTransportRegistry,
+    http_util::{self, H3Body, ProxiedResponse, hyper_to_http1},
+    web_transport::{WebTransportRegistry, WebTransportStreamReceiver, WebTransportStreamSender},
 };
 use axum::{
     Router,
@@ -11,14 +11,11 @@ use axum::{
 };
 use bytes::Bytes;
 use h3::ext::Protocol;
-use http::{Method, Request, StatusCode, Uri};
+use http::{Method, StatusCode, Uri};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
 use rustls::server::ResolvesServerCert;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::{mpsc, oneshot},
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info};
 
 pub async fn start_server(
@@ -145,8 +142,9 @@ async fn accept_h3_connection(
         };
 
         if let Some(server_name) = server_name.clone() {
-            if let Some(tx) = registry.requests.get(&server_name) {
-                let future = bind_h3_request_to_web_transport(tx.to_owned(), req, stream);
+            if let Some(web_transport_stream_receiver) = registry.get(&server_name) {
+                let future =
+                    bind_h3_stream_to_web_transport(web_transport_stream_receiver, req, stream);
 
                 tokio::spawn(async move {
                     if let Err(e) = future.await {
@@ -213,46 +211,21 @@ async fn accept_h3_session(
         return;
     };
 
-    let (tx, mut rx) = mpsc::channel::<
-        oneshot::Sender<
-            Result<
-                h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-                anyhow::Error,
-            >,
-        >,
-    >(32);
-
-    registry.requests.insert(server_name.clone(), tx);
+    let mut web_transport_stream_provider = registry.insert(&server_name);
 
     let session_id = session.session_id();
 
     tokio::spawn(async move {
         async fn open_bi(
-            tx: oneshot::Sender<
-                Result<
-                    h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-                    anyhow::Error,
-                >,
-            >,
+            web_transport_stream_sender: WebTransportStreamSender,
             session_id: h3_webtransport::SessionId,
             session: &h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>,
         ) -> bool {
-            match session.open_bi(session_id).await {
-                Ok(stream) => {
-                    let _ = tx.send(Ok(stream)).inspect_err(|_| {
-                        error!("error sending bidirectional WebTransport stream");
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e.into())).inspect_err(|_| {
-                        error!("error sending bidirectional WebTransport error");
-                    });
+            let result = session.open_bi(session_id).await;
+            let is_err = result.is_err();
+            web_transport_stream_sender.send(result);
 
-                    return true;
-                }
-            }
-
-            false
+            is_err
         }
 
         async fn accept_bi(
@@ -297,8 +270,8 @@ async fn accept_h3_session(
 
         loop {
             tokio::select! {
-                Some(tx) = rx.recv() => {
-                    if open_bi(tx, session_id, &session).await {
+                Some(web_transport_stream_sender) = web_transport_stream_provider.get_sender() => {
+                    if open_bi(web_transport_stream_sender, session_id, &session).await {
                         break;
                     }
                 }
@@ -310,36 +283,38 @@ async fn accept_h3_session(
             }
         }
 
-        registry.requests.remove(&server_name);
+        registry.remove(&server_name);
     });
 }
 
-async fn bind_h3_request_to_web_transport(
-    tx: mpsc::Sender<
-        oneshot::Sender<
-            Result<
-                h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-                anyhow::Error,
-            >,
-        >,
-    >,
-    req: Request<()>,
-    stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+async fn bind_h3_stream_to_web_transport(
+    web_transport_stream_receiver: WebTransportStreamReceiver,
+    h3_request: http::Request<()>,
+    h3_stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
 ) -> Result<(), anyhow::Error> {
-    let (resp_tx, resp_rx) = oneshot::channel::<
-        Result<
-            h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-            anyhow::Error,
-        >,
-    >();
+    let http1_service = TowerToHyperService::new(tower::service_fn(
+        move |request: hyper::Request<H3Body<h3_quinn::RecvStream>>| {
+            let web_transport_stream_receiver = web_transport_stream_receiver.clone();
 
-    if tx.send(resp_tx).await.is_err() {
-        return Err(anyhow::anyhow!("WebTransport session task dropped"));
-    }
+            async move { bind_request_to_web_transport(web_transport_stream_receiver, request).await }
+        },
+    ));
 
-    let web_transport_stream = resp_rx.await??;
+    http_util::h3_server(h3_request, h3_stream, http1_service).await
+}
 
-    http_util::h3_to_http1(req, stream, web_transport_stream).await?;
+pub async fn bind_request_to_web_transport<B>(
+    web_transport_stream_receiver: WebTransportStreamReceiver,
+    request: hyper::Request<B>,
+) -> Result<ProxiedResponse, anyhow::Error>
+where
+    B: hyper::body::Body + Send + 'static,
+    B::Data: Send,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let web_transport_stream = web_transport_stream_receiver
+        .request_web_transport_stream()
+        .await?;
 
-    Ok(())
+    Ok(hyper_to_http1(request, web_transport_stream).await)
 }

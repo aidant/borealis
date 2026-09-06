@@ -5,33 +5,20 @@ use axum::{
     extract::Request,
     middleware::{self, Next},
 };
-use bytes::Bytes;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     service::TowerToHyperService,
 };
 use rustls::server::ResolvesServerCert;
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::{mpsc, oneshot},
-};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::error;
 
 use crate::{
     app::{ServerImpl, ServerName},
-    http_util::{self, ProxiedResponse},
-    web_transport::WebTransportRegistry,
+    http_util::{ProxiedResponse, hyper_to_http1},
+    web_transport::{WebTransportRegistry, WebTransportStreamReceiver},
 };
-
-type WebTransportStreamRequest = mpsc::Sender<
-    oneshot::Sender<
-        Result<
-            h3_webtransport::stream::BidiStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-            anyhow::Error,
-        >,
-    >,
->;
 
 pub async fn start_server(
     addr: SocketAddr,
@@ -95,8 +82,8 @@ async fn accept_tls_stream(
         .map(|server_name| ServerName(server_name.to_owned()));
 
     if let Some(server_name) = server_name.clone() {
-        if let Some(tx) = registry.requests.get(&server_name) {
-            let future = bind_tcp_stream_to_web_transport(tx.to_owned(), stream);
+        if let Some(web_transport_stream_receiver) = registry.get(&server_name) {
+            let future = bind_tcp_stream_to_web_transport(web_transport_stream_receiver, stream);
 
             tokio::spawn(async move {
                 if let Err(e) = future.await {
@@ -143,7 +130,7 @@ async fn accept_tcp_stream(stream: TlsStream<TcpStream>, app: Router) -> Result<
 }
 
 async fn bind_tcp_stream_to_web_transport(
-    tx: WebTransportStreamRequest,
+    web_transport_stream_receiver: WebTransportStreamReceiver,
     stream: TlsStream<TcpStream>,
 ) -> Result<(), anyhow::Error> {
     hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
@@ -151,9 +138,11 @@ async fn bind_tcp_stream_to_web_transport(
             TokioIo::new(stream),
             TowerToHyperService::new(tower::service_fn(
                 move |request: hyper::Request<hyper::body::Incoming>| {
-                    let tx = tx.clone();
+                    let web_transport_stream_receiver = web_transport_stream_receiver.clone();
 
-                    async move { bind_request_to_web_transport(tx, request).await }
+                    async move {
+                        bind_request_to_web_transport(web_transport_stream_receiver, request).await
+                    }
                 },
             )),
         )
@@ -163,17 +152,18 @@ async fn bind_tcp_stream_to_web_transport(
     Ok(())
 }
 
-async fn bind_request_to_web_transport(
-    tx: WebTransportStreamRequest,
-    request: hyper::Request<hyper::body::Incoming>,
-) -> Result<ProxiedResponse, anyhow::Error> {
-    let (resp_tx, resp_rx) = oneshot::channel();
+pub async fn bind_request_to_web_transport<B>(
+    web_transport_stream_receiver: WebTransportStreamReceiver,
+    request: hyper::Request<B>,
+) -> Result<ProxiedResponse, anyhow::Error>
+where
+    B: hyper::body::Body + Send + 'static,
+    B::Data: Send,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let web_transport_stream = web_transport_stream_receiver
+        .request_web_transport_stream()
+        .await?;
 
-    if tx.send(resp_tx).await.is_err() {
-        return Err(anyhow::anyhow!("WebTransport session task dropped"));
-    }
-
-    let web_transport_stream = resp_rx.await??;
-
-    Ok(http_util::hyper_to_http1(request, web_transport_stream).await)
+    Ok(hyper_to_http1(request, web_transport_stream).await)
 }

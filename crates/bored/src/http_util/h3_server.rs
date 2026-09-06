@@ -14,7 +14,7 @@ where
             hyper::Request<H3Body<h3_quinn::RecvStream>>,
             Response = hyper::Response<B>,
         >,
-    S::Error: std::error::Error + Send + Sync + 'static,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     B: hyper::body::Body + Send + 'static,
     B::Data: Send + Sync,
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -24,7 +24,9 @@ where
     let (h3_request_parts, _) = h3_request.into_parts();
 
     let request = hyper::Request::from_parts(h3_request_parts, h3_recv_body(h3_recv));
-    let response = hyper::service::Service::call(&hyper_service, request).await?;
+    let response = hyper::service::Service::call(&hyper_service, request)
+        .await
+        .map_err(|error| anyhow::Error::from_boxed(error.into()))?;
 
     let (response_parts, response_body) = response.into_parts();
 

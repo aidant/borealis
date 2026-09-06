@@ -12,10 +12,7 @@ use crate::http_util::{
 pub type ProxiedResponse =
     hyper::Response<http_body_util::combinators::BoxBody<Bytes, hyper::Error>>;
 
-pub async fn hyper_to_http1<B, I>(
-    hyper_request: hyper::Request<B>,
-    http1_io: I,
-) -> ProxiedResponse
+pub async fn hyper_to_http1<B, I>(hyper_request: hyper::Request<B>, http1_io: I) -> ProxiedResponse
 where
     B: Body + Send + 'static,
     B::Data: Send,
@@ -24,13 +21,11 @@ where
 {
     let (hyper_request_parts, body) = hyper_request.into_parts();
 
-    let http1_request_parts = match request_parts_to_http1_request_parts(
-        hyper_request_parts,
-        body.size_hint().exact(),
-    ) {
-        Ok(parts) => parts,
-        Err(status) => return build_error(status),
-    };
+    let http1_request_parts =
+        match request_parts_to_http1_request_parts(hyper_request_parts, body.size_hint().exact()) {
+            Ok(parts) => parts,
+            Err(status) => return build_error(status),
+        };
 
     let request = hyper::Request::from_parts(http1_request_parts, body);
 

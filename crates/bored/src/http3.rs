@@ -3,7 +3,7 @@ use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 use crate::{
     app::{ServerImpl, ServerName},
     http_util::{self, H3Body, ProxiedResponse, hyper_to_http1},
-    web_transport::{WebTransportRegistry, WebTransportStreamReceiver, WebTransportStreamSender},
+    web_transport::{WebTransportRegistry, WebTransportStreamReceiver},
 };
 use axum::{
     Router,
@@ -11,11 +11,10 @@ use axum::{
 };
 use bytes::Bytes;
 use h3::ext::Protocol;
-use http::{Method, StatusCode, Uri};
+use http::{Method, Uri};
 use hyper_util::service::TowerToHyperService;
 use quinn::{TransportConfig, crypto::rustls::QuicServerConfig};
 use rustls::server::ResolvesServerCert;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info};
 
 pub async fn start_server(
@@ -222,70 +221,16 @@ async fn accept_h3_session(
     let session_id = session.session_id();
 
     tokio::spawn(async move {
-        async fn open_bi(
-            web_transport_stream_sender: WebTransportStreamSender,
-            session_id: h3_webtransport::SessionId,
-            session: &h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>,
-        ) -> bool {
+        while let Some(web_transport_stream_sender) =
+            web_transport_stream_provider.get_sender().await
+        {
             let result = session.open_bi(session_id).await;
             let is_err = result.is_err();
+
             web_transport_stream_sender.send(result);
 
-            is_err
-        }
-
-        async fn accept_bi(
-            session: &h3_webtransport::server::WebTransportSession<h3_quinn::Connection, Bytes>,
-        ) -> bool {
-            match session.accept_bi().await {
-                Ok(Some(h3_webtransport::server::AcceptedBi::BidiStream(
-                    _session_id,
-                    mut stream,
-                ))) => {
-                    let mut buf = vec![0; 1024];
-                    while let Ok(n) = stream.read(&mut buf).await {
-                        if n == 0 {
-                            break;
-                        }
-                        if stream.write_all(&buf[..n]).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                Ok(Some(h3_webtransport::server::AcceptedBi::Request(_req, mut stream))) => {
-                    let response = http::Response::builder()
-                        .status(StatusCode::NOT_IMPLEMENTED)
-                        .body(())
-                        .unwrap();
-
-                    let _ = stream.send_response(response).await;
-                    let _ = stream.finish().await;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    error!(
-                        "error accepting HTTP/3 WebTransport bidirectional stream {:?}",
-                        e
-                    );
-                    return true;
-                }
-            };
-
-            return false;
-        }
-
-        loop {
-            tokio::select! {
-                Some(web_transport_stream_sender) = web_transport_stream_provider.get_sender() => {
-                    if open_bi(web_transport_stream_sender, session_id, &session).await {
-                        break;
-                    }
-                }
-                res = accept_bi(&session) => {
-                    if res {
-                        break;
-                    }
-                }
+            if is_err {
+                break;
             }
         }
 

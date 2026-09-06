@@ -7,7 +7,7 @@ use tracing::debug;
 
 use crate::tls_util::SelfSignedCertifiedKeyExt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DynamicCertResolver {
     ca_signed_certs: DashMap<Domain<String>, Arc<CertifiedKey>>,
     self_signed_certs: DashMap<Domain<String>, Arc<CertifiedKey>>,
@@ -22,6 +22,7 @@ impl DynamicCertResolver {
     }
 
     pub fn insert(&self, domain_name: Domain<String>, certified_key: CertifiedKey) {
+        self.self_signed_certs.remove(&domain_name);
         self.ca_signed_certs
             .insert(domain_name, Arc::new(certified_key));
     }

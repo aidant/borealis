@@ -4,6 +4,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::{tls_util::DynamicCertResolver, web_transport::WebTransportRegistry};
 
+mod acme_util;
 mod app;
 mod http3;
 mod http_util;

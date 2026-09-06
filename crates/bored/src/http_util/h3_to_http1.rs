@@ -1,134 +1,13 @@
 use bytes::Bytes;
 use h3::{error::StreamError, server::RequestStream};
 use h3_util::server_body::H3IncomingServer;
-use http::{HeaderName, Request, StatusCode};
+use http::{Request, StatusCode};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, error};
+use tracing::error;
 
-const HOP_BY_HOP_HEADERS: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
-
-const RESTRICTED_REQUEST_HEADERS: &[&str] = &["content-length"];
-const RESTRICTED_REQUEST_HEADER_PREFIX: &[&str] = &["x-forwarded-"];
-
-fn h3_request_parts_to_http1_request_parts(
-    mut parts: http::request::Parts,
-) -> Result<http::request::Parts, StatusCode> {
-    parts.version = http::Version::HTTP_11;
-
-    let authority = parts
-        .uri
-        .authority()
-        .map(|authority| authority.as_str().to_owned())
-        .or_else(|| {
-            parts
-                .headers
-                .get("host")
-                .and_then(|host| host.to_str().ok().map(str::to_owned))
-        })
-        .ok_or_else(|| {
-            debug!("Unable to convert HTTP/3 into HTTP/1.1 unable to get authority");
-
-            StatusCode::BAD_REQUEST
-        })?;
-
-    parts.uri = http::Uri::builder()
-        .path_and_query(
-            parts
-                .uri
-                .path_and_query()
-                .map(|path_and_query| path_and_query.as_str())
-                .unwrap_or("/"),
-        )
-        .build()
-        .map_err(|e| {
-            debug!(
-                "Unable to convert HTTP/3 into HTTP/1.1 error building path: {:?}",
-                e
-            );
-            StatusCode::BAD_REQUEST
-        })?;
-
-    parts.headers.insert(
-        "host",
-        authority.parse().map_err(|e| {
-            debug!(
-                "Unable to convert HTTP/3 into HTTP/1.1 error parsing authority into header: {:?}",
-                e
-            );
-            StatusCode::BAD_REQUEST
-        })?,
-    );
-
-    let content_length = parts
-        .headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|content_length| content_length.to_str().ok())
-        .and_then(|content_length| content_length.parse::<u64>().ok());
-
-    let headers_to_remove = parts
-        .headers
-        .keys()
-        .filter(|name| {
-            let name = name.as_str().to_lowercase();
-
-            HOP_BY_HOP_HEADERS
-                .iter()
-                .chain(RESTRICTED_REQUEST_HEADERS)
-                .any(|header| &&name == header)
-                || RESTRICTED_REQUEST_HEADER_PREFIX
-                    .iter()
-                    .any(|header| name.starts_with(header))
-        })
-        .cloned()
-        .collect::<Vec<HeaderName>>();
-
-    for name in headers_to_remove {
-        parts.headers.remove(name);
-    }
-
-    match content_length {
-        Some(content_length) => parts.headers.insert(
-            http::header::CONTENT_LENGTH,
-            http::HeaderValue::from(content_length),
-        ),
-        None => parts.headers.insert(
-            http::header::TRANSFER_ENCODING,
-            http::HeaderValue::from_static("chunked"),
-        ),
-    };
-
-    Ok(parts)
-}
-
-fn http1_response_parts_to_h3_response_parts(
-    mut parts: http::response::Parts,
-) -> Result<http::response::Parts, StatusCode> {
-    let headers_to_remove = parts
-        .headers
-        .keys()
-        .filter(|name| {
-            let name = name.as_str().to_lowercase();
-
-            HOP_BY_HOP_HEADERS.iter().any(|header| &&name == header)
-        })
-        .cloned()
-        .collect::<Vec<HeaderName>>();
-
-    for name in headers_to_remove {
-        parts.headers.remove(name);
-    }
-
-    Ok(parts)
-}
+use crate::http_util::{
+    http1_response_parts_to_response_parts, request_parts_to_http1_request_parts,
+};
 
 pub async fn h3_to_http1<S, I>(
     h3_request: Request<()>,
@@ -141,7 +20,7 @@ where
     <S as h3::quic::BidiStream<bytes::Bytes>>::RecvStream: Send + 'static,
 {
     let (h3_request_parts, _) = h3_request.into_parts();
-    let http1_request_parts = match h3_request_parts_to_http1_request_parts(h3_request_parts) {
+    let http1_request_parts = match request_parts_to_http1_request_parts(h3_request_parts, None) {
         Ok(parts) => parts,
         Err(status) => return Ok(send_error(h3_stream, status).await?),
     };
@@ -175,7 +54,7 @@ where
 
     let (http1_response_parts, http1_response_body) = response.into_parts();
 
-    let h3_response_parts = match http1_response_parts_to_h3_response_parts(http1_response_parts) {
+    let h3_response_parts = match http1_response_parts_to_response_parts(http1_response_parts) {
         Ok(parts) => parts,
         Err(status) => {
             return Ok(send_error(h3_send, status).await?);

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -13,6 +13,8 @@ use rustls::server::ResolvesServerCert;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::error;
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::{
     app::{ServerImpl, ServerName},
@@ -52,28 +54,38 @@ pub async fn start_server(
     let listener = TcpListener::bind(addr).await?;
 
     loop {
-        if let Err(e) = accept_tls_stream(
+        let (stream, _addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                error!("accepting TCP connection failed: {:?}", e);
+                continue;
+            }
+        };
+
+        let future = accept_tls_stream(
             acceptor.clone(),
-            &listener,
+            stream,
             app.to_owned(),
             registry.to_owned(),
-        )
-        .await
-        {
-            error!("accepting HTTPS connection failed: {:?}", e);
-            continue;
-        };
+        );
+
+        tokio::spawn(async move {
+            if let Err(e) = future.await {
+                error!("accepting HTTPS connection failed: {:?}", e);
+            }
+        });
     }
 }
 
 async fn accept_tls_stream(
     acceptor: TlsAcceptor,
-    listener: &TcpListener,
+    stream: TcpStream,
     app: Router,
     registry: WebTransportRegistry,
 ) -> Result<(), anyhow::Error> {
-    let (stream, _addr) = listener.accept().await?;
-    let stream = acceptor.accept(stream).await?;
+    let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+        .await
+        .map_err(|_| anyhow::anyhow!("TLS handshake timed out after {HANDSHAKE_TIMEOUT:?}"))??;
 
     let (_io, session) = stream.get_ref();
 

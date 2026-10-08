@@ -39,6 +39,12 @@ impl DynamicCertResolver {
         return None;
     }
 
+    pub fn get_ca_signed(&self, domain_name: &Domain<String>) -> Option<Arc<CertifiedKey>> {
+        self.ca_signed_certs
+            .get(domain_name)
+            .map(|certified_key| certified_key.to_owned())
+    }
+
     pub fn get_or_self_sign(&self, domain_name: Domain<String>) -> Option<Arc<CertifiedKey>> {
         if let Some(certified_key) = self.get(&domain_name) {
             return Some(certified_key.to_owned());

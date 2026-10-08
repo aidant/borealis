@@ -42,7 +42,11 @@ impl CertificateService {
     }
 
     pub async fn order_cert(&self, domain_name: &Domain<String>) -> Result<(), anyhow::Error> {
-        if self.dynamic_cert_resolver.get(&domain_name).is_some() {
+        if self
+            .dynamic_cert_resolver
+            .get_ca_signed(domain_name)
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -56,6 +60,14 @@ impl CertificateService {
         };
 
         let lock = order_lock.lock().await;
+
+        if self
+            .dynamic_cert_resolver
+            .get_ca_signed(domain_name)
+            .is_some()
+        {
+            return Ok(());
+        }
 
         let cert_and_key = self.order_service.issue_cert(domain_name).await?;
         let certified_key = cert_and_key.clone().try_into()?;

@@ -58,13 +58,14 @@ impl CertificateService {
         let lock = order_lock.lock().await;
 
         let cert_and_key = self.order_service.issue_cert(domain_name).await?;
+        let certified_key = cert_and_key.clone().try_into()?;
 
         cert_and_key
             .write_to_disk(&self.certificate_cache_path, &domain_name)
             .await?;
 
         self.dynamic_cert_resolver
-            .insert(domain_name.to_owned(), cert_and_key.try_into()?);
+            .insert(domain_name.to_owned(), certified_key);
 
         drop(lock);
 

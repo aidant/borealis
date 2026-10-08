@@ -72,6 +72,7 @@ impl OrderService {
         let account = self
             .account_service
             .get()
+            .await
             .ok_or(IssueCertError::NoAccount)?;
 
         let mut order = account
@@ -79,7 +80,7 @@ impl OrderService {
             .await
             .map_err(IssueCertError::OrderFailed)?;
 
-        let mut challenges = Vec::new();
+        let mut scoped_challenges = self.challenge_service.with_scoped_challenges();
         let mut authorizations = order.authorizations();
 
         while let Some(authorization_result) = authorizations.next().await {
@@ -95,9 +96,7 @@ impl OrderService {
                 .challenge(ChallengeType::Http01)
                 .ok_or(IssueCertError::UnsupportedChallenge)?;
 
-            challenges.push(challenge.token.to_owned());
-
-            self.challenge_service.accept_challenge(
+            scoped_challenges.accept_challenge(
                 challenge.token.to_owned(),
                 challenge.key_authorization().as_str().to_owned(),
             );

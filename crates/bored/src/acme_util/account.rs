@@ -40,15 +40,17 @@ impl AccountService {
         }
     }
 
-    pub fn get(&self) -> Option<Account> {
-        self.account
-            .try_lock()
-            .ok()
-            .and_then(|account| account.to_owned())
+    pub async fn get(&self) -> Option<Account> {
+        self.account.lock().await.clone()
     }
 
     pub async fn init_from_disk(&self) -> Result<(), AccountFromCredentialsError> {
-        let account_credentials_string = fs::read_to_string(&self.account_credentials_path).await?;
+        let account_credentials_string =
+            match fs::read_to_string(&self.account_credentials_path).await {
+                Ok(credentials) => credentials,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
         let account_credentials =
             serde_json::from_str::<AccountCredentials>(&account_credentials_string)?;
 
@@ -56,7 +58,7 @@ impl AccountService {
             .from_credentials(account_credentials)
             .await?;
 
-        self.account.lock().await.insert(account);
+        let _ = self.account.lock().await.insert(account);
 
         Ok(())
     }
@@ -81,9 +83,12 @@ impl AccountService {
 
         let account_credentials_string = serde_json::to_string_pretty(&account_credentials)?;
 
+        if let Some(parent_dir) = self.account_credentials_path.parent() {
+            fs::create_dir_all(parent_dir).await?;
+        }
         fs::write(&self.account_credentials_path, account_credentials_string).await?;
 
-        self.account.lock().await.insert(account);
+        let _ = self.account.lock().await.insert(account);
 
         Ok(())
     }

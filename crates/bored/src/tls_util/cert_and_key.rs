@@ -16,6 +16,7 @@ use rustls::{
 use tokio::fs;
 use tracing::debug;
 
+#[derive(Debug, Clone)]
 pub struct CertAndKey {
     pub cert: String,
     pub key: String,
@@ -42,7 +43,11 @@ impl CertAndKey {
     ) -> Result<HashMap<Domain<String>, CertAndKey>, io::Error> {
         let mut map = HashMap::new();
 
-        let mut entries = fs::read_dir(cache_dir).await?;
+        let mut entries = match fs::read_dir(cache_dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(map),
+            Err(error) => return Err(error),
+        };
         while let Some(entry) = entries.next_entry().await? {
             if !entry.file_type().await?.is_dir() {
                 continue;
@@ -81,6 +86,7 @@ impl CertAndKey {
         let cert_path = domain_path.join("cert.pem");
         let key_path = domain_path.join("key.pem");
 
+        fs::create_dir_all(&domain_path).await?;
         tokio::try_join!(
             fs::write(cert_path, &self.cert),
             fs::write(key_path, &self.key),

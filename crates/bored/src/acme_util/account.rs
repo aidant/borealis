@@ -1,11 +1,11 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use instant_acme::{Account, AccountCredentials, NewAccount};
-use tokio::fs;
+use tokio::{fs, sync::Mutex};
 
 pub struct AccountService {
     account_credentials_path: PathBuf,
-    account: Option<Account>,
+    account: Arc<Mutex<Option<Account>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,18 +33,21 @@ pub enum AccountCreateError {
 }
 
 impl AccountService {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(account_credentials_path: PathBuf) -> Self {
         Self {
-            account_credentials_path: path,
-            account: None,
+            account_credentials_path: account_credentials_path,
+            account: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn get(&self) -> Option<Account> {
-        self.account.to_owned()
+        self.account
+            .try_lock()
+            .ok()
+            .and_then(|account| account.to_owned())
     }
 
-    pub async fn from_credentials(&mut self) -> Result<Account, AccountFromCredentialsError> {
+    pub async fn init_from_disk(&self) -> Result<(), AccountFromCredentialsError> {
         let account_credentials_string = fs::read_to_string(&self.account_credentials_path).await?;
         let account_credentials =
             serde_json::from_str::<AccountCredentials>(&account_credentials_string)?;
@@ -53,15 +56,17 @@ impl AccountService {
             .from_credentials(account_credentials)
             .await?;
 
-        Ok(self.account.insert(account).to_owned())
+        self.account.lock().await.insert(account);
+
+        Ok(())
     }
 
     pub async fn create(
-        &mut self,
+        &self,
         email: &str,
         tos: bool,
         directory_url: &str,
-    ) -> Result<Account, AccountCreateError> {
+    ) -> Result<(), AccountCreateError> {
         let (account, account_credentials) = Account::builder()?
             .create(
                 &NewAccount {
@@ -78,6 +83,8 @@ impl AccountService {
 
         fs::write(&self.account_credentials_path, account_credentials_string).await?;
 
-        Ok(self.account.insert(account).to_owned())
+        self.account.lock().await.insert(account);
+
+        Ok(())
     }
 }

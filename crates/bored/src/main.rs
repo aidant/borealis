@@ -1,8 +1,12 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use tracing_subscriber::fmt::format::FmtSpan;
 
-use crate::{tls_util::DynamicCertResolver, web_transport::WebTransportRegistry};
+use crate::{
+    acme_util::{AccountService, CertificateService, ChallengeService, OrderService},
+    tls_util::DynamicCertResolver,
+    web_transport::WebTransportRegistry,
+};
 
 mod acme_util;
 mod app;
@@ -27,20 +31,38 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let server_addr: SocketAddr = "127.0.0.1:8443".parse()?;
 
-    let dynamic_cert_resolver = DynamicCertResolver::new();
-
-    let resolver = Arc::new(dynamic_cert_resolver);
-    let router = app::init(resolver.to_owned()).await?;
+    let dynamic_cert_resolver = Arc::new(DynamicCertResolver::new());
+    let router = app::init(dynamic_cert_resolver.to_owned()).await?;
     let registry = WebTransportRegistry::new();
+
+    let account_credentials_path = PathBuf::from("./data/acme/account.json");
+    let certificate_cache_path = PathBuf::from("./data/acme/certificates/");
+
+    let account_service = Arc::new(AccountService::new(account_credentials_path));
+    let challenge_service = Arc::new(ChallengeService::new());
+    let order_service = Arc::new(OrderService::new(
+        account_service.clone(),
+        challenge_service,
+    ));
+    let certificate_service = CertificateService::new(
+        certificate_cache_path,
+        dynamic_cert_resolver.to_owned(),
+        order_service,
+    );
+
+    account_service.init_from_disk().await?;
+    certificate_service.init_from_disk().await?;
 
     tokio::try_join!(
         https::start_server(
             server_addr,
-            resolver.to_owned(),
+            dynamic_cert_resolver.to_owned(),
             router.clone(),
             registry.to_owned()
         ),
-        async { Ok(http3::start_server(server_addr, resolver, router, registry).await?) }
+        async {
+            Ok(http3::start_server(server_addr, dynamic_cert_resolver, router, registry).await?)
+        }
     )?;
 
     Ok(())

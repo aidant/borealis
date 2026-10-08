@@ -1,15 +1,18 @@
+use std::sync::Arc;
+
 use hostaddr::Domain;
 use instant_acme::{
     AuthorizationStatus, ChallengeType, Identifier, NewOrder, OrderStatus, RetryPolicy,
 };
 
-use crate::acme_util::{
-    account::AccountService, cert_and_key::CertAndKey, challenge::ChallengeService,
+use crate::{
+    acme_util::{account::AccountService, challenge::ChallengeService},
+    tls_util::CertAndKey,
 };
 
 pub struct OrderService {
-    account_service: AccountService,
-    challenge_service: ChallengeService,
+    account_service: Arc<AccountService>,
+    challenge_service: Arc<ChallengeService>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,14 +55,20 @@ pub enum IssueCertError {
 }
 
 impl OrderService {
-    pub fn new(account_service: AccountService, challenge_service: ChallengeService) -> Self {
+    pub fn new(
+        account_service: Arc<AccountService>,
+        challenge_service: Arc<ChallengeService>,
+    ) -> Self {
         Self {
             account_service: account_service,
             challenge_service: challenge_service,
         }
     }
 
-    async fn issue_cert(&self, domain_name: &Domain<String>) -> Result<CertAndKey, IssueCertError> {
+    pub(super) async fn issue_cert(
+        &self,
+        domain_name: &Domain<String>,
+    ) -> Result<CertAndKey, IssueCertError> {
         let account = self
             .account_service
             .get()

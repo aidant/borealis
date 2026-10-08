@@ -1,4 +1,8 @@
-use std::{collections::HashMap, io::BufReader, path::Path};
+use std::{
+    collections::HashMap,
+    io::{self, BufReader, ErrorKind},
+    path::Path,
+};
 
 use hostaddr::Domain;
 use rcgen::KeyPair;
@@ -21,20 +25,21 @@ impl CertAndKey {
     pub async fn read_from_disk(
         cache_dir: &Path,
         domain_name: &Domain<String>,
-    ) -> Result<CertAndKey, std::io::Error> {
+    ) -> Result<Option<CertAndKey>, io::Error> {
         let domain_path = cache_dir.join(&domain_name.to_string());
         let cert_path = domain_path.join("cert.pem");
         let key_path = domain_path.join("key.pem");
 
-        let (cert, key) =
-            tokio::try_join!(fs::read_to_string(cert_path), fs::read_to_string(key_path))?;
-
-        Ok(CertAndKey { cert, key })
+        match tokio::try_join!(fs::read_to_string(cert_path), fs::read_to_string(key_path)) {
+            Ok((cert, key)) => Ok(Some(CertAndKey { cert, key })),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn read_all_from_disk(
         cache_dir: &Path,
-    ) -> Result<HashMap<Domain<String>, CertAndKey>, std::io::Error> {
+    ) -> Result<HashMap<Domain<String>, CertAndKey>, io::Error> {
         let mut map = HashMap::new();
 
         let mut entries = fs::read_dir(cache_dir).await?;
@@ -43,8 +48,8 @@ impl CertAndKey {
                 continue;
             }
 
-            let file_name = entry.file_name();
-            let Some(dir_name) = file_name.to_str() else {
+            let dir_name = entry.file_name();
+            let Some(dir_name) = dir_name.to_str() else {
                 continue;
             };
 
@@ -57,7 +62,9 @@ impl CertAndKey {
                 continue;
             };
 
-            let cert_and_key = Self::read_from_disk(cache_dir, &domain_name).await?;
+            let Some(cert_and_key) = Self::read_from_disk(cache_dir, &domain_name).await? else {
+                continue;
+            };
 
             map.insert(domain_name, cert_and_key);
         }
@@ -69,7 +76,7 @@ impl CertAndKey {
         &self,
         cache_dir: &Path,
         domain_name: &Domain<String>,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<(), io::Error> {
         let domain_path = cache_dir.join(&domain_name.to_string());
         let cert_path = domain_path.join("cert.pem");
         let key_path = domain_path.join("key.pem");

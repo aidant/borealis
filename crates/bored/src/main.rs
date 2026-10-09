@@ -10,6 +10,7 @@ use crate::{
 
 mod acme_util;
 mod app;
+mod http;
 mod http3;
 mod http_util;
 mod https;
@@ -30,6 +31,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .unwrap();
 
     let server_addr: SocketAddr = "127.0.0.1:8443".parse()?;
+    let http_addr: SocketAddr = "127.0.0.1:8080".parse()?;
 
     let dynamic_cert_resolver = Arc::new(DynamicCertResolver::new());
     let router = app::init(dynamic_cert_resolver.to_owned()).await?;
@@ -42,7 +44,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let challenge_service = Arc::new(ChallengeService::new());
     let order_service = Arc::new(OrderService::new(
         account_service.clone(),
-        challenge_service,
+        challenge_service.clone(),
     ));
     let certificate_service = CertificateService::new(
         certificate_cache_path,
@@ -54,6 +56,7 @@ async fn main() -> Result<(), anyhow::Error> {
     certificate_service.init_from_disk().await?;
 
     tokio::try_join!(
+        http::start_server(http_addr, server_addr, challenge_service),
         https::start_server(
             server_addr,
             dynamic_cert_resolver.to_owned(),

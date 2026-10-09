@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+axum-extra = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 h3 = { workspace = true }

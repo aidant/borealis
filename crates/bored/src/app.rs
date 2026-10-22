@@ -1,15 +1,15 @@
 use std::{ops::Deref, sync::Arc};
 
 use axum::{
-    Extension, Router,
+    Extension, Json, Router,
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use hostaddr::Domain;
 use http::StatusCode;
 use sha2::{Digest, Sha256};
 
-use crate::tls_util::DynamicCertResolver;
+use crate::{routes, tls_util::DynamicCertResolver};
 
 #[derive(Debug, Clone, Copy)]
 pub enum ServerImpl {
@@ -50,11 +50,20 @@ async fn fallback(
     )
 }
 
+async fn create_portal() -> Json<serde_json::Value> {
+    Json(serde_json::json!({}))
+}
+
 pub async fn init(
     dynamic_cert_resolver: Arc<DynamicCertResolver>,
 ) -> Result<Router, anyhow::Error> {
-    let app = Router::new()
-        .route(
+    let app = Router::new();
+    let app = routes::create_portal::init(app);
+    let app = routes::list_portals::init(app);
+    let app = routes::get_portal::init(app);
+    let app = routes::delete_portal::init(app);
+    let app = routes::portal_connect::init(app);
+    let app = app.route(
             "/",
             get(async move |server_name: Option<Extension<ServerName>>| -> Result<Response, (StatusCode, &'static str)> {
                 let domain_name = Domain::<String>::try_from(

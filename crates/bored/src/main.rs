@@ -14,6 +14,7 @@ mod http;
 mod http3;
 mod http_util;
 mod https;
+mod routes;
 mod tls_util;
 mod web_transport;
 
